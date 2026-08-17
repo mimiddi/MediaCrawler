@@ -51,6 +51,35 @@ class XhsStoreFactory:
         return store_class()
 
 
+def _pick_best_video_url(videos: List[Dict]) -> str:
+    """Pick the highest-resolution downloadable URL from a video stream list."""
+    candidates = []
+    for item in videos:
+        if not isinstance(item, dict):
+            continue
+
+        height = item.get("height") or item.get("video_height") or 0
+        try:
+            height = int(height)
+        except (TypeError, ValueError):
+            height = 0
+
+        master_url = item.get("master_url") or item.get("masterUrl") or ""
+        backup_urls = item.get("backup_urls") or item.get("backupUrls") or []
+        if not isinstance(backup_urls, (list, tuple)):
+            backup_urls = []
+
+        url = master_url or (backup_urls[0] if backup_urls else "")
+        if url:
+            candidates.append((height, url))
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    return candidates[0][1]
+
+
 def get_video_url_arr(note_item: Dict) -> List:
     """
     Get video url array
@@ -60,29 +89,36 @@ def get_video_url_arr(note_item: Dict) -> List:
     Returns:
 
     """
-    if note_item.get('type') != 'video':
+    if note_item.get("type") != "video":
         return []
 
-    video_dict = note_item.get('video')
+    video_dict = note_item.get("video")
     if not video_dict:
         return []
 
-    videoArr = []
-    consumer = video_dict.get('consumer', {})
-    originVideoKey = consumer.get('origin_video_key', '')
-    if originVideoKey == '':
-        originVideoKey = consumer.get('originVideoKey', '')
-    # Fallback with watermark
-    if originVideoKey == '':
-        media = video_dict.get('media', {})
-        stream = media.get('stream', {})
-        videos = stream.get('h264')
-        if type(videos).__name__ == 'list':
-            videoArr = [v.get('master_url') for v in videos]
-    else:
-        videoArr = [f"http://sns-video-bd.xhscdn.com/{originVideoKey}"]
+    consumer = video_dict.get("consumer") or {}
+    origin_video_key = (
+        consumer.get("origin_video_key")
+        or consumer.get("originVideoKey")
+        or ""
+    )
+    if origin_video_key:
+        return [f"http://sns-video-bd.xhscdn.com/{origin_video_key}"]
 
-    return videoArr
+    # PC 端已不再稳定返回 origin_video_key，视频流改为放在 media.stream
+    # 的多个编码键（h264/h265/av1 等）下，因此遍历所有键而不是只取 h264。
+    media = video_dict.get("media") or {}
+    stream = media.get("stream") or {}
+    if not isinstance(stream, dict):
+        return []
+
+    video_items: List[Dict] = []
+    for videos in stream.values():
+        if isinstance(videos, list):
+            video_items.extend(videos)
+
+    best_url = _pick_best_video_url(video_items)
+    return [best_url] if best_url else []
 
 
 async def update_xhs_note(note_item: Dict):

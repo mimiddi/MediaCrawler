@@ -18,8 +18,10 @@ import argparse
 import json
 import os
 import pathlib
+import random
 import re
 import sys
+import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -29,15 +31,32 @@ import httpx
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "xhs"
 
-HEADERS = {
-    "User-Agent": (
+USER_AGENTS = [
+    (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/126.0.0.0 Safari/537.36"
     ),
-    "Referer": "https://www.xiaohongshu.com/",
-    "Accept": "*/*",
-}
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/126.0.0.0 Safari/537.36"
+    ),
+]
+
+
+def build_headers() -> Dict[str, str]:
+    """Return request headers with a randomly selected browser user agent."""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Referer": "https://www.xiaohongshu.com/",
+        "Accept": "*/*",
+    }
 
 CONTENT_TYPE_EXT = {
     "image/jpeg": ".jpg",
@@ -72,10 +91,11 @@ def resolve_ext(content_type: str, fallback: str) -> str:
 def download(url: str, kind: str, insecure: bool = False) -> Tuple[bytes, str, str]:
     """Download bytes and return (content, extension, content_type)."""
     last_error: Optional[Exception] = None
+    headers = build_headers()
     for verify in (not insecure, False):
         try:
             with httpx.Client(
-                headers=HEADERS,
+                headers=headers,
                 follow_redirects=True,
                 timeout=30.0,
                 verify=verify,
@@ -121,6 +141,16 @@ def to_relative(path: pathlib.Path) -> str:
     return os.path.relpath(path, BASE_DIR).replace("\\", "/")
 
 
+def human_delay(delay_range: Optional[Tuple[float, float]]) -> None:
+    """Sleep a random interval to mimic human browsing between downloads."""
+    if not delay_range:
+        return
+    low, high = delay_range
+    if low <= 0 and high <= 0:
+        return
+    time.sleep(random.uniform(low, high))
+
+
 def ensure_downloaded(
     url: str,
     note_id: str,
@@ -131,10 +161,12 @@ def ensure_downloaded(
     downloaded: List[Dict],
     failed: List[Dict],
     insecure: bool,
+    delay_range: Optional[Tuple[float, float]],
 ) -> Optional[str]:
     if url in cache:
         return cache[url]
 
+    human_delay(delay_range)
     try:
         content, ext, content_type = download(url, kind, insecure=insecure)
     except Exception as exc:  # noqa: BLE001 - report every failure individually
@@ -179,6 +211,7 @@ def process_contents(
     counters: Dict[Tuple[str, str, Optional[str]], int],
     downloaded: List[Dict],
     failed: List[Dict],
+    delay_range: Optional[Tuple[float, float]],
 ) -> None:
     for record in records:
         note_id = record.get("note_id")
@@ -188,12 +221,12 @@ def process_contents(
         record["local_image_paths"] = [
             path
             for url in image_urls
-            if (path := ensure_downloaded(url, note_id, "img", None, cache, counters, downloaded, failed, insecure))
+            if (path := ensure_downloaded(url, note_id, "img", None, cache, counters, downloaded, failed, insecure, delay_range))
         ]
         record["local_video_paths"] = [
             path
             for url in video_urls
-            if (path := ensure_downloaded(url, note_id, "video", None, cache, counters, downloaded, failed, insecure))
+            if (path := ensure_downloaded(url, note_id, "video", None, cache, counters, downloaded, failed, insecure, delay_range))
         ]
 
 
@@ -204,6 +237,7 @@ def process_comments(
     counters: Dict[Tuple[str, str, Optional[str]], int],
     downloaded: List[Dict],
     failed: List[Dict],
+    delay_range: Optional[Tuple[float, float]],
 ) -> None:
     for record in records:
         note_id = record.get("note_id")
@@ -212,7 +246,7 @@ def process_comments(
         record["local_pictures"] = [
             path
             for url in picture_urls
-            if (path := ensure_downloaded(url, note_id, "comment_img", comment_id, cache, counters, downloaded, failed, insecure))
+            if (path := ensure_downloaded(url, note_id, "comment_img", comment_id, cache, counters, downloaded, failed, insecure, delay_range))
         ]
 
 
@@ -241,7 +275,38 @@ def main(argv: List[str]) -> int:
         default=DATA_DIR / "json" / "detail_comments_2026-08-17.json",
     )
     parser.add_argument("--insecure", action="store_true", help="Disable TLS verification")
+    parser.add_argument(
+        "--delay-min",
+        type=float,
+        default=1.0,
+        help="Minimum random delay before each download, in seconds (default: 1.0)",
+    )
+    parser.add_argument(
+        "--delay-max",
+        type=float,
+        default=3.0,
+        help="Maximum random delay before each download, in seconds (default: 3.0)",
+    )
+    parser.add_argument(
+        "--no-delay",
+        action="store_true",
+        help="Disable the human-like random delay between downloads",
+    )
     args = parser.parse_args(argv)
+
+    if args.delay_min < 0 or args.delay_max < 0:
+        parser.error("delay values must be non-negative")
+    if args.delay_min > args.delay_max:
+        parser.error("--delay-min must not be greater than --delay-max")
+
+    delay_range: Optional[Tuple[float, float]] = (
+        None if args.no_delay else (args.delay_min, args.delay_max)
+    )
+    if delay_range:
+        print(
+            f"[delay] random {args.delay_min:.1f}s - {args.delay_max:.1f}s before each download",
+            flush=True,
+        )
 
     content_path = args.content_json
     comment_path = args.comment_json
@@ -255,8 +320,8 @@ def main(argv: List[str]) -> int:
     downloaded: List[Dict] = []
     failed: List[Dict] = []
 
-    process_contents(content_records, args.insecure, cache, counters, downloaded, failed)
-    process_comments(comment_records, args.insecure, cache, counters, downloaded, failed)
+    process_contents(content_records, args.insecure, cache, counters, downloaded, failed, delay_range)
+    process_comments(comment_records, args.insecure, cache, counters, downloaded, failed, delay_range)
 
     content_out = content_path.with_name(f"{content_path.stem}_with_media.json")
     comment_out = comment_path.with_name(f"{comment_path.stem}_with_media.json")
